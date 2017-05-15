@@ -1,0 +1,340 @@
+---
+title: "Capstone Project - Milestone Report"
+author: "Alicia Rodriguez"
+date: "11 May 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+```
+
+## Objectives
+
+This report shows the results from the exploratory analysis performed over the three documents conforming the corpora of texts, with which the word prediction model will be built. 
+
+## Analysis of the size of the corpora
+
+First, let's load the data and take a look at the encoding:
+```{r load_data, cache = TRUE}
+#dont know encoding
+library(readr)
+guess_encoding("./final/en_US/en_US.twitter.txt", n_max=-1)
+#seems to be UTF-8
+
+en_twitter <- read_lines(con <- file("./final/en_US/en_US.twitter.txt", encoding = "UTF-8")) 
+en_blogs <- read_lines(con <- file("./final/en_US/en_US.blogs.txt", encoding = "UTF-8"))
+en_news <- read_lines(con <- file("./final/en_US/en_US.news.txt", encoding = "UTF-8")) 
+
+Encoding(en_twitter) <- "UTF-8"
+Encoding(en_blogs) <- "UTF-8"
+Encoding(en_news) <- "UTF-8"
+
+## Does any line contain non-ASCII characters?
+any(grep("I_WAS_NOT_ASCII", iconv(en_twitter, "UTF-8", "ASCII", sub="I_WAS_NOT_ASCII")))
+any(grep("I_WAS_NOT_ASCII", iconv(en_blogs, "UTF-8", "ASCII", sub="I_WAS_NOT_ASCII")))
+any(grep("I_WAS_NOT_ASCII", iconv(en_news, "UTF-8", "ASCII", sub="I_WAS_NOT_ASCII")))
+```
+
+So we see that the three sources have non-ascii characters, and thus, we need to delete them (the final size of the corpus is clearly bigger when filtering out the non-ascii chars). Let's create the corpora and make some filtering. We consider:
+
+* Filtering non-ascii chars
+* Transforming to lower case to reduce size of dictionary of different words
+* Ignoring mispelled words (besides, filtering them takes an extraordinary amount of time). We consider that they will appear much less than the correct version, and thus will be ignored with respect to the correct version (in fact, they may be deleted from the matrix and model, because of the low frequency. More on that on following sections)
+* Ignoring URLs (considering that each URL will be almost unique, and thus, unfrequent)
+* Numbers could be key in our model. Thus, we replace any number (or combination of numbers, punctuation and letters, e.g., 5.2B or 1920s) by the word NUM
+* Stop puctuation (., ..., :, ;, ?, !) could be key in our model. Thus, we transform any combination of these signs by the word STOP
+* Deleting all other signs
+* Ignoring profanity words. We agree on not predicting them, but we think they are part of the speech, and thus, of the text structure on which we are basing our prediction model. Therefore, we intend that profanity words will be part of the model, but we will try to replace its predictions by the next most probable word.
+
+(NOTE. I have used tm package to create the corpus because of its flexibility in transforming the text. However, in order to create the document term frequency matrix, I used quanteda package since it is much faster, and solve my problems when trying to initially analyze the whole corpus).
+```{r loading_corpus_tm, cache = TRUE, dependson = "load_data"}
+library(tm)
+
+en_twitter_textDoc <- PlainTextDocument(en_twitter, heading = "en_US_twitter", language = "en")
+en_blogs_textDoc <- PlainTextDocument(en_blogs, heading = "en_US_blogs", language = "en")
+en_news_textDoc <- PlainTextDocument(en_news, heading = "en_US_news", language = "en")
+
+en_corpus <- c(en_twitter_textDoc, en_blogs_textDoc, en_news_textDoc)
+#the previous line replaces the VCorpus( ... ), leveraging the already loaded documents
+#en_corpus <- VCorpus(DirSource("./final/en_US/", encoding = "UTF-8"), 
+#                      readerControl = list(reader = readPlain,
+#                                           language = "en_US",
+#                                           load = TRUE))
+#to inspect content
+
+#en_corpus[[1]]$content[1]
+
+en_corpus <- tm_map(en_corpus, content_transformer(iconv), 
+                    from = "UTF-8", to = "ASCII", sub = "")
+en_corpus <- tm_map(en_corpus, content_transformer(tolower))
+
+en_corpus <- tm_map(en_corpus, content_transformer(gsub), 
+                    pattern = "[[:alnum:]]*[[:digit:]]+(\\.|,)*[[:digit:]]*[[:alnum:]]*", 
+                    replacement = " NNUMM ")
+
+en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = "[\\.|;|:|\\?|!]+", replacement = " SSTPP ")
+
+#At first, I tried leaving ' and - in the text, but the tokenizer recognizes them
+#as separate tokens, so they're deleted too
+en_corpus <- tm_map(en_corpus, content_transformer(gsub), 
+                    pattern = "[^[:alnum:][:space:]]", replacement = "")
+
+en_corpus <- tm_map(en_corpus, stripWhitespace)
+```
+
+Let's try to create the document-term matrix for unigrams and bigrams, using the quanteda package for speed reasons.
+```{r complete_dfm_building, cache = TRUE, dependson = "loading_corpus_tm"}
+#need for installing
+#install.packages("Matrix")
+#install.packages("quanteda")
+#beware of the warnings: need to restart session and rstudio after each installation
+library(quanteda)
+en_qcorpus <- corpus(en_corpus)
+dfm_unigram<-dfm(en_qcorpus)
+dfm_bigram<-dfm(en_qcorpus, ngrams=2)
+
+dfm_unigram_size <- format(object.size(dfm_unigram), units = "Mb")
+dfm_bigram_size <- format(object.size(dfm_bigram), units = "Mb")                           
+```
+
+Taking a look at the size of the two matrices (`r dfm_unigram_size` for the unigram case, and `r dfm_bigram_size` for the bigram case) we can conclude that we cannot use the whole set of lines from the texts, since the size of the model is extremely big (even when ignoring the trigram case). Thus, let's sample the original data set to obtain a 10% of its contents and compare with the complete case (several % have been tested, and all of them achieved similar results with respect to distribution of frequency of words, thus keeping 10% because the resulting corpora and term-frequency matrices have a reduced size that allows for bounded computing times).
+
+```{r creating_sampled_corpus, cache = TRUE, dependson = "load_data"}
+library(tm)
+set.seed(12345)
+samples_twitter <- rbinom(length(en_twitter), size=1, prob=0.1)
+samples_blogs <- rbinom(length(en_blogs), size=1, prob=0.1)
+samples_news <- rbinom(length(en_news), size=1, prob=0.1)
+
+en_twitter_sampled <- en_twitter[which(samples_twitter==1)]
+en_blogs_sampled <- en_blogs[which(samples_blogs==1)]
+en_news_sampled <- en_news[which(samples_news==1)]
+
+en_twitter_sampled_textDoc <- PlainTextDocument(en_twitter_sampled, heading = "en_US_twitter_sampled", language = "en")
+en_blogs_sampled_textDoc <- PlainTextDocument(en_blogs_sampled, heading = "en_US_blogs_sampled", language = "en")
+en_news_sampled_textDoc <- PlainTextDocument(en_news_sampled, heading = "en_US_news_sampled", language = "en")
+
+en_corpus_sampled <- c(en_twitter_sampled_textDoc, en_blogs_sampled_textDoc, en_news_sampled_textDoc)
+en_corpus_sampled <- tm_map(en_corpus_sampled, content_transformer(iconv), 
+                    from = "UTF-8", to = "ASCII", sub = "")
+en_corpus_sampled <- tm_map(en_corpus_sampled, content_transformer(tolower))
+
+en_corpus_sampled <- tm_map(en_corpus_sampled, content_transformer(gsub), 
+                    pattern = "[[:alnum:]]*[[:digit:]]+(\\.|,)*[[:digit:]]*[[:alnum:]]*", 
+                    replacement = " NNUMM ")
+
+en_corpus_sampled <- tm_map(en_corpus_sampled, content_transformer(gsub), pattern = "[\\.|;|:|\\?|!]+", replacement = " SSTPP ")
+
+en_corpus_sampled <- tm_map(en_corpus_sampled, content_transformer(gsub), 
+                    pattern = "[^[:alnum:][:space:]]", replacement = "")
+
+en_corpus_sampled <- tm_map(en_corpus_sampled, stripWhitespace)
+```
+
+## Unigram exploratory analysis
+
+First, let's make a comparison of the sampled and not-sampled versions of the corpus:
+
+| Document   | Number lines original  | Number lines sampled           |
+| --------   | ---------------------  | --------------------           |
+| en_twitter | `r length(en_twitter)` | `r length(en_twitter_sampled)` |
+| en_blogs   | `r length(en_blogs)`   | `r length(en_blogs_sampled)`   |
+| en_news    | `r length(en_news)`    | `r length(en_news_sampled)`    |
+
+And also of the size of the resulting corpora:
+
+| Corpus | Size |
+| ------ | ---- |
+| en_corpus | `r format(object.size(en_corpus), units = "Mb")`|
+| en_corpus_sampled | `r format(object.size(en_corpus_sampled), units = "Mb")`|
+
+Now, let's extract the unigrams:
+
+```{r complete_dfm_sampled_building, cache = TRUE, dependson = "creating_sampled_corpus"}
+#need for installing
+#install.packages("Matrix")
+#install.packages("quanteda")
+#beware of the warnings: need to restart session and rstudio after each installation
+library(quanteda)
+en_qcorpus_sampled <- corpus(en_corpus_sampled)
+dfm_unigram_sampled<-dfm(en_qcorpus_sampled)
+dfm_bigram_sampled<-dfm(en_qcorpus_sampled, ngrams=2)
+dfm_trigram_sampled<-dfm(en_qcorpus_sampled, ngrams=3)
+
+dfm_unigram_size_sampled <- format(object.size(dfm_unigram_sampled), units = "Mb")
+dfm_bigram_size_sampled <- format(object.size(dfm_bigram_sampled), units = "Mb")  
+dfm_trigram_size_sampled <- format(object.size(dfm_trigram_sampled), units = "Mb")  
+```
+
+| Matrix | Size |
+| ------ | ---- |
+| dfm_unigram | `r dfm_unigram_size` |
+| dfm_unigram_sampled | `r dfm_unigram_size_sampled`|
+| dfm_bigram | `r dfm_bigram_size`|
+| dfm_bigram_sampled | `r dfm_bigram_size_sampled`|
+| dfm_trigram_sampled | `r dfm_trigram_size_sampled`|
+
+and perform some exploraroty analysis on the results:
+
+```{r unigram_exploratory_analysis, cache = TRUE, dependson = c("complete_dfm_sampled_building", "complete_dfm_building") }
+#Convert to matrix to easily operate over it
+freqWordsSource <- as.matrix(dfm_unigram)
+freqWordsSource_sampled <- as.matrix(dfm_unigram_sampled)
+
+#Number of words per source
+numberWordsSource <- data.frame(twitter = sum(freqWordsSource[1,]),
+                              twitter_sampled = sum(freqWordsSource_sampled[1,]),
+                              blogs = sum(freqWordsSource[2,]),
+                              blogs_sampled = sum(freqWordsSource_sampled[2,]),
+                              news = sum(freqWordsSource[3,]),
+                              news_sampled = sum(freqWordsSource_sampled[3,]))
+numberWordsSource
+
+numberWords = numberWordsSource$twitter + numberWordsSource$blogs + numberWordsSource$news
+numberWords_sampled = numberWordsSource$twitter_sampled + numberWordsSource$blogs_sampled + numberWordsSource$news_sampled
+
+#dictionary length
+distinctWordsSource <- data.frame(twitter = sum(freqWordsSource[1,]>0),
+                            twitter_sampled = sum(freqWordsSource_sampled[1,]>0),
+                            blogs = sum(freqWordsSource[2,]>0),
+                            blogs_sampled = sum(freqWordsSource_sampled[2,]>0),
+                            news = sum(freqWordsSource[3,]>0),
+                            news_sampled = sum(freqWordsSource_sampled[3,]>0))
+distinctWordsSource
+
+#most common words
+twitterWordsFreq<-sort(freqWordsSource[1,], decreasing=TRUE)
+blogsWordsFreq<-sort(freqWordsSource[2,], decreasing=TRUE)
+newsWordsFreq<-sort(freqWordsSource[3,], decreasing=TRUE)
+
+twitterWordsFreq_sampled<-sort(freqWordsSource_sampled[1,], decreasing=TRUE)
+blogsWordsFreq_sampled<-sort(freqWordsSource_sampled[2,], decreasing=TRUE)
+newsWordsFreq_sampled<-sort(freqWordsSource_sampled[3,], decreasing=TRUE)
+
+mostCommonWords <- data.frame(twitter = names(twitterWordsFreq[1:20]), 
+                              twitter_sampled = names(twitterWordsFreq_sampled[1:20]),
+                              blogs = names(blogsWordsFreq[1:20]),
+                              blogs_sampled = names(blogsWordsFreq_sampled[1:20]),
+                              news = names(newsWordsFreq[1:20]),
+                              news_sampled = names(newsWordsFreq_sampled[1:20]))
+mostCommonWords
+```
+
+```{r word_frequency_plots, cache = TRUE, dependson = "unigram_exploratory_analysis"}
+#Frequency of words
+freqWords = sort(colSums(freqWordsSource), decreasing=TRUE)
+freqWords_sampled = sort(colSums(freqWordsSource_sampled), decreasing=TRUE)
+
+cumsumfreq <- cumsum(freqWords)
+cumsumfreq_sampled <- cumsum(freqWords_sampled)
+
+par(mfrow=c(1,2))
+plot(x=((1:length(cumsumfreq))/length(cumsumfreq)),y=(cumsumfreq/numberWords), type = "l", 
+     main = "Cumulative Distribution of Appearance of Words, Original Corpus", 
+     xlab = "Fraction Distinct Words", ylab = "Cumulative Frequency")
+plot(x=((1:length(cumsumfreq_sampled))/length(cumsumfreq_sampled)),y=(cumsumfreq_sampled/numberWords_sampled), type = "l", main = "Cumulative Distribution of Appearance of Words, Sampled Corpus", 
+     xlab = "Fraction Distinct Words", ylab = "Cumulative Frequency")
+
+par(mfrow=c(1,2))
+barplot(height = freqWords[1:200]/numberWords,
+        main = "Probability of Appeareance of 200 Most Used Words, Original Corpus",
+        xlab = "Words", ylab = "Probability of Appearance")
+barplot(height = freqWords_sampled[1:200]/numberWords_sampled,
+        main = "Probability of Appeareance of 200 Most Used Words, Sampled Corpus",
+        xlab = "Words", ylab = "Probability of Appearance")
+```
+
+## Bigrams and Trigram Analysis
+
+Taking the sampled version of the data, let's see the distribution of bigrams and trigrams.
+
+```{r bigrams_analysis, cache = TRUE, dependson = "complete_dfm_sampled_building"}
+#Convert to matrix to easily operate over it
+bigramsSource_sampled <- as.matrix(dfm_bigram_sampled)
+
+#Number of words per source
+numberBigramsSource <- data.frame(twitter = sum(bigramsSource_sampled[1,]),
+                              blogs = sum(bigramsSource_sampled[2,]),
+                              news = sum(bigramsSource_sampled[3,]))
+numberBigramsSource
+
+numberBigrams = numberBigramsSource$twitter + numberBigramsSource$blogs + numberBigramsSource$news
+
+#dictionary length
+distinctBigramsSource <- data.frame(twitter = sum(bigramsSource_sampled[1,]>0),
+                            blogs = sum(bigramsSource_sampled[2,]>0),
+                            news = sum(bigramsSource_sampled[3,]>0))
+distinctBigramsSource
+
+#most common words
+twitterBigramsFreq<-sort(bigramsSource_sampled[1,], decreasing=TRUE)
+blogsBigramsFreq<-sort(bigramsSource_sampled[2,], decreasing=TRUE)
+newsBigramsFreq<-sort(bigramsSource_sampled[3,], decreasing=TRUE)
+
+mostCommonBigrams <- data.frame(twitter = names(twitterBigramsFreq[1:20]), 
+                              blogs = names(blogsBigramsFreq[1:20]),
+                              news = names(newsBigramsFreq[1:20]))
+mostCommonBigrams
+
+#Frequency of words
+freqBigrams = sort(colSums(bigramsSource_sampled), decreasing=TRUE)
+
+cumsumFreqBigrams <- cumsum(freqBigrams)
+
+par(mfrow=c(1,2))
+plot(x=((1:length(cumsumFreqBigrams))/length(cumsumFreqBigrams)),
+     y=(cumsumFreqBigrams/numberBigrams), type = "l", 
+     main = "Cumulative Distribution of Appearance of Bigrams, Sampled Corpus", 
+     xlab = "Fraction Distinct Bigrams", ylab = "Cumulative Frequency")
+
+barplot(height = freqBigrams[1:500]/numberBigrams,
+        main = "Probability of Appeareance of 500 Most Used Bigrams, Sampled Corpus",
+        xlab = "Bigrams", ylab = "Probability of Appearance")
+```
+
+
+```{r trigrams_analysis, cache = TRUE, dependson="complete_dfm_sampled_building"}
+#Convert to matrix to easily operate over it
+trigramsSource_sampled <- as.matrix(dfm_trigram_sampled)
+
+#Number of words per source
+numberTrigramsSource <- data.frame(twitter = sum(trigramsSource_sampled[1,]),
+                              blogs = sum(trigramsSource_sampled[2,]),
+                              news = sum(trigramsSource_sampled[3,]))
+numberTrigramsSource
+
+numberTrigrams = numberTrigramsSource$twitter + numberTrigramsSource$blogs + numberTrigramsSource$news
+
+#dictionary length
+distinctTrigramsSource <- data.frame(twitter = sum(trigramsSource_sampled[1,]>0),
+                            blogs = sum(trigramsSource_sampled[2,]>0),
+                            news = sum(trigramsSource_sampled[3,]>0))
+distinctTrigramsSource
+
+#most common words
+twitterTrigramsFreq<-sort(trigramsSource_sampled[1,], decreasing=TRUE)
+blogsTrigramsFreq<-sort(trigramsSource_sampled[2,], decreasing=TRUE)
+newsTrigramsFreq<-sort(trigramsSource_sampled[3,], decreasing=TRUE)
+
+mostCommonTrigrams <- data.frame(twitter = names(twitterTrigramsFreq[1:20]), 
+                              blogs = names(blogsTrigramsFreq[1:20]),
+                              news = names(newsTrigramsFreq[1:20]))
+mostCommonTrigrams
+
+#Frequency of words
+freqTrigrams = sort(colSums(trigramsSource_sampled), decreasing=TRUE)
+
+cumsumFreqTrigrams <- cumsum(freqTrigrams)
+
+par(mfrow=c(1,2))
+plot(x=((1:length(cumsumFreqTrigrams))/length(cumsumFreqTrigrams)),
+     y=(cumsumFreqTrigrams/numberTrigrams), type = "l", 
+     main = "Cumulative Distribution of Appearance of Trigrams, Sampled Corpus", 
+     xlab = "Fraction Distinct Trigrams", ylab = "Cumulative Frequency")
+
+barplot(height = freqTrigrams[1:500]/numberTrigrams,
+        main = "Probability of Appeareance of 500 Most Used Trigrams, Sampled Corpus",
+        xlab = "Trigrams", ylab = "Probability of Appearance")
+```
+
