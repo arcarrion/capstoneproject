@@ -1,0 +1,254 @@
+---
+title: "Untitled"
+author: "Alicia Rodriguez"
+date: "6 May 2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Process
+
+Helpful reference: https://rpubs.com/Nikotino/58395
+
+First, let's load the data:
+```{r load_data}
+#dont know encoding
+library(readr)
+guess_encoding("./final/en_US/en_US.twitter.txt", n_max=-1)
+
+#seems to be UTF-8
+en_twitter <- readLines(con <- file("./final/en_US/en_US.twitter.txt", encoding = "UTF-8")) 
+close(con)
+en_blogs <- readLines(con <- file("./final/en_US/en_US.blogs.txt", encoding = "UTF-8")) 
+close(con)
+en_news <- readLines(con <- file("./final/en_US/en_US.news.txt", encoding = "UTF-8")) 
+close(con)
+
+en_twitter <- read_lines(con <- file("./final/en_US/en_US.twitter.txt")) 
+en_blogs <- read_lines(con <- file("./final/en_US/en_US.blogs.txt"))
+en_news <- read_lines(con <- file("./final/en_US/en_US.news.txt")) 
+
+Encoding(en_twitter) <- "UTF-8"
+Encoding(en_blogs) <- "UTF-8"
+Encoding(en_news) <- "UTF-8"
+
+## Do *any* lines contain non-ASCII characters? 
+#any(grepl("I_WAS_NOT_ASCII", iconv(en_twitter, "UTF-8", "ASCII", sub="I_WAS_NOT_ASCII")))
+
+## Find which lines (e.g. read in by readLines()) contain non-ASCII characters
+grep("I_WAS_NOT_ASCII", iconv(en_twitter, "UTF-8", "ASCII", sub="I_WAS_NOT_ASCII"))
+grep("I_WAS_NOT_ASCII", iconv(en_blogs, "UTF-8", "ASCII", sub="I_WAS_NOT_ASCII"))
+grep("I_WAS_NOT_ASCII", iconv(en_news, "UTF-8", "ASCII", sub="I_WAS_NOT_ASCII"))
+
+#en_twitter <- iconv(en_twitter, "UTF-8", "ASCII", sub="")
+#en_blogs <- iconv(en_blogs, "UTF-8", "ASCII", sub="")
+#en_news <- iconv(en_news, "UTF-8", "ASCII", sub="")
+
+#en_corpus<-c(en_twitter,en_blogs,en_news)
+```
+
+Sampling might be handy:
+```{r sampling_data}
+set.seed(12345)
+p<-rbinom(n = length(en_corpus),prob = 0.1,size=1)
+sampled_corpus<-en_corpus[p]
+```
+
+```{r loading_corpus_tm}
+library(tm)
+en_corpus <- VCorpus(DirSource("./final/en_US/", encoding = "UTF-8"), 
+                      readerControl = list(reader = readPlain,
+                                           language = "en_US",
+                                           load = TRUE))
+#to inspect content
+#en_corpus[[1]]$content[1]
+
+en_corpus <- tm_map(en_corpus, content_transformer(iconv), 
+                    from = "UTF-8", to = "ASCII", sub = "")
+
+en_corpus <- tm_map(en_corpus, content_transformer(tolower))
+
+#mispelled words would be remove when removing low frequency words
+#since, otherwise, it is an extremely computationally expensive operation
+#Besides, there are many words like blog, twitter and so on which are 
+#frequently used but not in the dictionary, thus worth to preserve them
+#The approximation will be to keep the most used words which are, generally, 
+#the correct version and also quite used words that might not belong to the
+#dictionary yet, but are interesting for the users
+#mispelled_words_blogs <- hunspell(en_corpus[[1]]$content)
+#mispelled_words_news <- hunspell(en_corpus[[2]]$content)
+#mispelled_words_twitter <- hunspell(en_corpus[[3]]$content)
+
+#mispelled_words <- unique(c(mispelled_words_blogs,mispelled_words_news,mispelled_words_twitter))
+#en_corpus2 <- en_corpus
+#for (mispelled_word in mispelled_words_blogs) {
+#  en_corpus2 <- tm_map(en_corpus2, content_transformer(gsub), 
+#                    pattern = paste0("\\b(",mispelled_word, ")\\b"), 
+#                    replacement = "UNK")
+#}
+        
+#remove urls from http://stackoverflow.com/questions/161738/what-is-the-best-regular-expression-to-check-if-a-string-is-a-valid-url
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub),
+#pattern = "((([A-Za-z]{3,9}:(?:\\/\\/)?)(?:[\\-;:&=\\+\\$,\\w]+@)?[A-Za-z0-9\\.\\-]+|(?:www\\.|[\\-;:&=\\+\\$,\\w]+@)[A-Za-z0-9\\.\\-]+)((?:\\/[\\+~%\\/\\.\\w\\-]*)?\\??(?:[\\-\\+=&;%@\\.\\w]*)#?(?:[\\.\\!\\/\\\\w]*))?)g", 
+#replacement = " URL ")
+#URLs will be also minority, so can be filtered out because of frequency
+
+
+#en_corpus <- tm_map(en_corpus, removeNumbers) 
+en_corpus <- tm_map(en_corpus, content_transformer(gsub), 
+                    pattern = "[[:alnum:]]*[[:digit:]]+(\\.|,)*[[:digit:]]*[[:alnum:]]*", 
+                    replacement = " NUM ")
+
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = "\\.", replacement = " *DOT* ")
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = ",", replacement = "")
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = ";", replacement = " *SEM* ")
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = ":", replacement = " *COL* ")
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = "\\?", replacement = " *INT* ")
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = "!", replacement = " *EXC* ")
+en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = "[\\.|;|:|\\?|!]+", replacement = " STOP ")
+#en_corpus <- tm_map(en_corpus, content_transformer(gsub), pattern = "[\\\n|\\\t|\\\r]", replacement = "")
+
+#en_corpus <- tm_map(en_corpus, removeWords, c("\\n","\\t","\\r")) 
+
+#At first, I tried leaving ' and - in the text, but the tokenizer recognizes them
+#as separate tokens, so they're deleted too
+en_corpus <- tm_map(en_corpus, content_transformer(gsub), 
+                    pattern = "[^[:alnum:][:space:]]", replacement = "")
+
+#gsub('[[:punct:]]','',x)
+#!"#$%&'()\\*\\+,\-\\./:;<=>?@[\\\]\\^_{|}~`
+
+
+#en_corpus <- tm_map(en_corpus, removeWords, stopwords("english")) 
+#en_corpus <- tm_map(en_corpus, removePunctuation) 
+#list of bad words from https://www.freewebheaders.com/full-list-of-bad-words-banned-by-google/
+
+
+#For the model, I leave them, but I would not predict them (next most probable hit)
+#badwords <- readLines("http://www.cs.cmu.edu/~biglou/resources/bad-words.txt")
+#badwords2 <- readLines("https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en")
+#badwords3 <- readLines("http://www.bannedwordlist.com/lists/swearWords.txt")
+#en_corpus <- tm_map(en_corpus, removeWords, badwords) 
+
+#From http://www-01.sil.org/linguistics/wordlists/english/
+#english_words <- readLines("http://www-01.sil.org/linguistics/wordlists/english/wordlist/wordsEn.txt")
+#en_corpus <- tm_map(en_corpus, removeWords, english_words) 
+
+en_corpus <- tm_map(en_corpus, stripWhitespace)
+
+#need for installing
+#install.packages("Matrix")
+#install.packages("quanteda")
+#beware of the warnings: need to restart session and rstudio after each installation
+#library(quanteda)
+#en_qcorpus <- corpus(en_corpus)
+#dfm_unigram<-dfm(en_qcorpus)
+
+dtm_unigram <- DocumentTermMatrix(en_corpus) 
+```
+
+Let's perform some exploratory analysis on the results:
+
+```{r exploratory_analysis}
+#Quick look at terms matrix
+inspect(dtm[1:3, 100:109])
+
+#Convert to matrix to easily operate over it
+freqWordsSource <- as.matrix(dfm_unigram)
+
+blogsWordsFreq<-sort(freqWordsSource[1,], decreasing=TRUE)
+newsWordsFreq<-sort(freqWordsSource[2,], decreasing=TRUE)
+twitterWordsFreq<-sort(freqWordsSource[3,], decreasing=TRUE)
+
+mostCommonWords <- data.frame(names(blogsWordsFreq[1:20]),names(newsWordsFreq[1:20]),names(twitterWordsFreq[1:20]))
+names(mostCommonWords)<-c("blogs","news","twitter")
+mostCommonWords
+
+#Number of words per source
+numberWordsSource = sort(rowSums(freqWordsSource), decreasing=TRUE)
+numberWordsSource
+
+#Frequency of words
+freqWords = sort(colSums(freqWordsSource), decreasing=TRUE)
+library(wordcloud)
+wordcloud(names(freqWords), freqWords, max.words=100, colors=brewer.pal(3, "Dark2"))
+
+numberWords = sum(numberWordsSource)
+
+cumsumfreq <- cumsum(freqWords)
+plot(x=((1:length(cumsumfreq))/length(cumsumfreq)),y=(cumsumfreq/numberWords), type = "l")
+barplot(height = freqWords[1:500]/numberWords)
+```
+
+Taking a look at the results, we see that less than 10% of the words accumulate 90% of the appearances in the text. Besides, a quick inspection of the 30 first words (in alphabetical order) shows us one of the reasons:
+```{r inspect_word_freq}
+colSums(freqWordsSource[,1:30])
+```
+
+Many words are mispelled, or exclamations with repeated letters, which are rarely used. It may be convenient to filter out words mispelled or non existent in the dictionary. In order to filter out words pertaining to other languages, it may be convenient to filter out only those words which do not exist in the dictionary are has low frequency.
+
+```{r create_ngrams}
+  #BigramTokenizer <-
+  #function(x)
+  #  unlist(lapply(ngrams(words(x), 2), paste, collapse = " "), use.names = FALSE)
+BigramTokenizer <- function(x) RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 2, max = 2))
+
+  bigram_tdm <- TermDocumentMatrix(en_corpus, control = list(tokenize = BigramTokenizer))
+  #inspect(removeSparseTerms(tdm[, 1:10], 0.7))
+  
+  #Try out VCorpus to get Ngrams...
+  
+  #Convert to matrix to easily operate over it
+bigram_freqWordsSource <- as.matrix(bigram_tdm)
+
+mostCommonWords <- data.frame(names(blogsWordsFreq[1:20]),names(newsWordsFreq[1:20]),names(twitterWordsFreq[1:20]))
+names(mostCommonWords)<-c("blogs","news","twitter")
+mostCommonWords
+
+#Number of words per source
+numberWordsSource = sort(rowSums(freqWordsSource), decreasing=TRUE)
+numberWordsSource
+
+#Frequency of words
+freqWords = sort(colSums(freqWordsSource), decreasing=TRUE)
+library(wordcloud)
+wordcloud(names(freqWords), freqWords, max.words=100, colors=brewer.pal(3, "Dark2"))
+
+numberWords = colSums(numberWordsSource)
+
+plot(x=((1:length(cumsumfreq))/length(cumsumfreq)),y=(cumsumfreq/numberWords), type = "l")
+barplot(height = freqWords[1:500]/numberWords)
+  
+  
+  
+  
+  
+  
+  
+  TrigramTokenizer <-
+  function(x)
+    unlist(lapply(ngrams(words(x), 3), paste, collapse = " "), use.names = FALSE)
+
+  trigram_tdm <- DocumentTermMatrix(en_corpus, control = list(tokenize = TrigramTokenizer))
+  #inspect(removeSparseTerms(tdm[, 1:10], 0.7))
+```
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
